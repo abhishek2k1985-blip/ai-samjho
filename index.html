@@ -590,34 +590,144 @@ function updateStats(){
 }
 
 // CHAT — uses free Pollinations AI (no API key needed, works from browser)
+// ── REAL AI CHAT — uses user's internet, no API key stored ──────────
+// Uses multiple free AI endpoints as fallback chain
+const CHAT_HISTORY = [];
+
+async function tryFetch(url, opts){
+  const ctrl = new AbortController();
+  const tid = setTimeout(()=>ctrl.abort(), 12000);
+  try{
+    const r = await fetch(url, {...opts, signal: ctrl.signal});
+    clearTimeout(tid);
+    return r;
+  } catch(e){ clearTimeout(tid); throw e; }
+}
+
+async function getAIReply(userMsg){
+  const sys = `You are "AI Samjho" — a friendly AI learning assistant created by Abhishek Tiwari for the AI Samjho app. Help users learn about AI in simple clear English. Use Indian examples (Swiggy, Zomato, IRCTC, Jio, etc) where helpful. Keep answers to 4-5 lines max. Use emojis occasionally. If asked who made you say: I was created by Abhishek Tiwari as part of the AI Samjho platform.`;
+
+  // Build message history for context
+  const msgs = [{role:'system', content: sys}];
+  CHAT_HISTORY.slice(-6).forEach(m => msgs.push(m));
+  msgs.push({role:'user', content: userMsg});
+
+  // Endpoint 1 — Groq (fastest, most reliable, free)
+  try{
+    const r = await tryFetch('https://api.groq.com/openai/v1/chat/completions',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer gsk_free'},
+      body: JSON.stringify({model:'llama3-8b-8192', messages: msgs, max_tokens:400})
+    });
+    if(r.ok){
+      const d = await r.json();
+      const reply = d.choices?.[0]?.message?.content;
+      if(reply) return reply;
+    }
+  } catch(e){}
+
+  // Endpoint 2 — Pollinations with CORS headers
+  try{
+    const r = await tryFetch(`https://text.pollinations.ai/`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({messages: msgs, model:'openai', seed:42})
+    });
+    if(r.ok){
+      const reply = await r.text();
+      if(reply && reply.length > 10) return reply;
+    }
+  } catch(e){}
+
+  // Endpoint 3 — Pollinations GET (original method)
+  try{
+    const r = await tryFetch(
+      `https://text.pollinations.ai/${encodeURIComponent(userMsg)}?system=${encodeURIComponent(sys)}&model=openai`,
+      {method:'GET'}
+    );
+    if(r.ok){
+      const reply = await r.text();
+      if(reply && reply.length > 10) return reply;
+    }
+  } catch(e){}
+
+  // Endpoint 4 — DuckDuckGo AI (no auth needed)
+  try{
+    const r1 = await tryFetch('https://duckduckgo.com/duckchat/v1/status',{method:'GET',headers:{'x-vqd-accept':'1'}});
+    const vqd = r1.headers.get('x-vqd-4');
+    if(vqd){
+      const r2 = await tryFetch('https://duckduckgo.com/duckchat/v1/chat',{
+        method:'POST',
+        headers:{'Content-Type':'application/json','x-vqd-4':vqd},
+        body: JSON.stringify({model:'gpt-4o-mini', messages:[{role:'user',content:sys+'\n\n'+userMsg}]})
+      });
+      if(r2.ok){
+        const text = await r2.text();
+        const chunks = text.split('data: ').filter(c=>c.trim()&&c!=='[DONE]');
+        const reply = chunks.map(c=>{try{return JSON.parse(c).message||''}catch{return ''}}).join('');
+        if(reply.length > 10) return reply;
+      }
+    }
+  } catch(e){}
+
+  return null; // all failed
+}
+
 async function sendMsg(){
   const inp=document.getElementById('chatInp');
   const msgs=document.getElementById('chatMsgs');
   const text=inp.value.trim();
   if(!text)return;
   inp.value='';
+  CHAT_HISTORY.push({role:'user', content: text});
   msgs.innerHTML+=`<div class="msg usr">${escHtml(text)}</div>`;
   const lid='ld'+Date.now();
   msgs.innerHTML+=`<div class="msg load" id="${lid}">🤔 Thinking...</div>`;
   msgs.scrollTop=msgs.scrollHeight;
   try{
-    const sysPrompt=`You are "AI Samjho" assistant created by Abhishek Tiwari to help non-technical Indian users learn about AI. 
-    Answer in clear simple English. Be warm and friendly. Use Indian examples where helpful (Swiggy, Zomato, IRCTC, Jio, etc).
-    Keep answers to 4-5 lines maximum. Use line breaks for readability. Use emojis occasionally.
-    If someone asks who made you, say: "I was created by Abhishek Tiwari as part of the AI Samjho platform."`;
-    const res=await fetch(`https://text.pollinations.ai/${encodeURIComponent(text)}?system=${encodeURIComponent(sysPrompt)}&model=openai&json=false`,{method:'GET'});
-    const reply=await res.text();
+    const reply = await getAIReply(text);
     const el=document.getElementById(lid);
     if(el)el.remove();
-    msgs.innerHTML+=`<div class="msg bot">${escHtml(reply).replace(/\n/g,'<br>')}</div>`;
-    addXP(5);showToast('+5 XP! Great question!');
-  }catch(err){
+    if(reply){
+      CHAT_HISTORY.push({role:'assistant', content: reply});
+      msgs.innerHTML+=`<div class="msg bot">${escHtml(reply).replace(/\n/g,'<br>')}</div>`;
+      addXP(5);showToast('+5 XP! Great question!');
+    } else {
+      // Smart fallback — at least give a useful answer
+      msgs.innerHTML+=`<div class="msg bot">🤔 My connection is a bit slow right now! Try one of these instead:<br><br>✅ <b>chatgpt.com</b> — Free AI chat<br>✅ <b>gemini.google.com</b> — Google's free AI<br>✅ <b>claude.ai</b> — Great for detailed answers<br><br>Or check the 📚 <b>Learn tab</b> — it has answers to most common AI questions! 😊</div>`;
+    }
+  } catch(err){
     const el=document.getElementById(lid);
-    if(el)el.textContent='⚠️ Could not connect. Please check your internet and try again.';
+    if(el)el.remove();
+    msgs.innerHTML+=`<div class="msg bot">😊 Having trouble connecting right now. Please check your internet and try again — or explore the 📚 Learn tab for AI lessons! 🙏</div>`;
   }
   msgs.scrollTop=msgs.scrollHeight;
   updateStats();
 }
+
+// placeholder — not used anymore but kept for safety
+const KB = [
+  // WHAT IS AI
+  {k:['what is ai','what is artificial intelligence','ai kya hai','explain ai','define ai','meaning of ai'],
+   a:`🤖 <b>Artificial Intelligence (AI)</b> is technology that allows computers to think, learn and make decisions — similar to how humans do.<br><br>Think of it like a very smart student who has read millions of books. AI learns from huge amounts of data and uses that learning to answer questions, recognize images, translate languages and much more.<br><br>AI is already part of your daily life — when YouTube suggests videos, when Swiggy estimates delivery time, when Gmail filters spam — that's all AI! 😊`},
+
+  // CHATGPT
+  {k:['what is chatgpt','chatgpt kya','about chatgpt','chatgpt explain','how chatgpt works','chatgpt use'],
+   a:`💬 <b>ChatGPT</b> is an AI chatbot made by OpenAI that can have real conversations with you and answer almost any question.<br><br>It was trained on a massive amount of internet text — books, articles, websites — so it can discuss almost any topic. You can use it in English, Hindi, or any language!<br><br>✅ Free at chatgpt.com<br>✅ Write emails, essays, code, recipes<br>✅ Ask follow-up questions like a real conversation<br><br>Tip: Always double-check important facts — it can sometimes be wrong! 🎯`},
+
+  // HOW TO EARN WITH AI
+  {k:['earn money ai','paise kamao','make money ai','income ai','ai se paise','earn with ai','ai income','make money online ai'],
+   a:`💰 <b>Top ways to earn money with AI from home:</b><br><br>1️⃣ <b>Amazon Affiliate + Pinterest</b> — Create AI-designed pins, add affiliate links, earn commission on every sale<br>2️⃣ <b>Fiverr</b> — Sell AI-written content, AI images, AI voiceovers to clients<br>3️⃣ <b>Content Writing</b> — Use ChatGPT to write articles/captions for businesses at ₹200-500 each<br>4️⃣ <b>AI Image Selling</b> — Sell on Shutterstock or Adobe Stock<br>5️⃣ <b>WhatsApp/Instagram</b> — Share affiliate links with warm audience<br><br>Start with Fiverr or Pinterest affiliate — both are free to join! 🚀`},
+
+  // FREE AI TOOLS
+  {k:['free ai tools','best ai tools','ai tools india','free tools ai','which ai tool','top ai tools'],
+   a:`🛠️ <b>Best Free AI Tools for India:</b><br><br>💬 <b>ChatGPT</b> (chat.openai.com) — Write anything, ask anything<br>✨ <b>Google Gemini</b> (gemini.google.com) — Google's AI, works in Hindi<br>🧠 <b>Claude AI</b> (claude.ai) — Best for long writing and analysis<br>🔍 <b>Perplexity AI</b> (perplexity.ai) — Better than Google search<br>🎨 <b>Bing Image Creator</b> — Free AI image generation<br>🖌️ <b>Canva AI</b> — Design + AI in one place<br>🪟 <b>MS Copilot</b> — Free, real-time web access<br><br>All of these have free plans — start with ChatGPT or Gemini! ✅`},
+
+  // AI IMAGE
+  {k:['ai image','create image ai','image generation','text to image','ai art','make image ai','generate image','ai photo'],
+   a:`🎨 <b>How to create AI images for free:</b><br><br>Just type a description (called a "prompt") and AI creates the image!<br><br><b>Best free tools:</b><br>🎨 <b>Bing Image Creator</b> — bing.com/images/create (completely free)<br>🖌️ <b>Canva AI</b> — magic image feature inside Canva<br>🦁 <b>Leonardo.ai</b> — free daily credits<br>🦋 <b>Adobe Firefly</b> — free, commercial use allowed<br><br><b>Example prompt:</b> "A beautiful Indian woman in red saree in a mustard field at sunset, cinematic photography"<br><br>Better description = better image! Try it now 🚀`},
+
+]; // end KB placeholder
 
 function escHtml(t){return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function quickAsk(q){document.getElementById('chatInp').value=q;sendMsg();}
